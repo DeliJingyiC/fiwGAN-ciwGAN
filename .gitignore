@@ -1,0 +1,5 @@
+setTwo/
+__pycache__/
+tensorboard/
+sbatch/
+model/

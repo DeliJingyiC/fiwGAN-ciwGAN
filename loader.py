@@ -1,13 +1,18 @@
+from re import A
 from scipy.io.wavfile import read as wavread
 import numpy as np
-
+from pathlib import Path
 import tensorflow as tf
 
-import sys
 
-
-def decode_audio(fp, fs=None, num_channels=1, normalize=False, fast_wav=False):
-  """Decodes audio file paths into 32-bit floating point vectors.
+def decode_audio(
+    fp: np.ndarray,
+    fs=None,
+    num_channels=1,
+    normalize=False,
+    fast_wav=False,
+):
+    """Decodes audio file paths into 32-bit floating point vectors.
 
   Args:
     fp: Audio file path.
@@ -18,56 +23,87 @@ def decode_audio(fp, fs=None, num_channels=1, normalize=False, fast_wav=False):
   Returns:
     A np.float32 array containing the audio samples at specified sample rate.
   """
-  if fast_wav:
-    # Read with scipy wavread (fast).
-    _fs, _wav = wavread(fp)
-    if fs is not None and fs != _fs:
-      raise NotImplementedError('Scipy cannot resample audio.')
-    if _wav.dtype == np.int16:
-      _wav = _wav.astype(np.float32)
-      _wav /= 32768.
-    elif _wav.dtype == np.float32:
-      _wav = np.copy(_wav)
+    fp = np.array2string(fp).replace("'", "")
+    #print(f"decode_audio {type(fp)} {fp}")
+    if fast_wav:
+        # Read with scipy wavread (fast).
+        _fs, _wav = wavread(fp)
+        if fs is not None and fs != _fs:
+            raise NotImplementedError('Scipy cannot resample audio.')
+        if _wav.dtype == np.int16:
+            _wav = _wav.astype(np.float32)
+            _wav /= 32768.
+        elif _wav.dtype == np.float32:
+            _wav = np.copy(_wav)
+        else:
+            raise NotImplementedError(
+                'Scipy cannot process atypical WAV files.')
     else:
-      raise NotImplementedError('Scipy cannot process atypical WAV files.')
-  else:
-    # Decode with librosa load (slow but supports file formats like mp3).
-    import librosa
-    _wav, _fs = librosa.core.load(fp, sr=fs, mono=False)
-    if _wav.ndim == 2:
-      _wav = np.swapaxes(_wav, 0, 1)
+        # Decode with librosa load (slow but supports file formats like mp3).
+        import librosa
+        _wav, _fs = librosa.core.load(Path(fp), sr=fs, mono=False)
+        if _wav.ndim == 2:
+            _wav = np.swapaxes(_wav, 0, 1)
 
-  assert _wav.dtype == np.float32
+    assert _wav.dtype == np.float32
 
-  # At this point, _wav is np.float32 either [nsamps,] or [nsamps, nch].
-  # We want [nsamps, 1, nch] to mimic 2D shape of spectral feats.
-  if _wav.ndim == 1:
-    nsamps = _wav.shape[0]
-    nch = 1
-  else:
-    nsamps, nch = _wav.shape
-  _wav = np.reshape(_wav, [nsamps, 1, nch])
- 
-  # Average (mono) or expand (stereo) channels
-  if nch != num_channels:
-    if num_channels == 1:
-      _wav = np.mean(_wav, 2, keepdims=True)
-    elif nch == 1 and num_channels == 2:
-      _wav = np.concatenate([_wav, _wav], axis=2)
+    # At this point, _wav is np.float32 either [nsamps,] or [nsamps, nch].
+    # We want [nsamps, 1, nch] to mimic 2D shape of spectral feats.
+    if _wav.ndim == 1:
+        nsamps = _wav.shape[0]
+        nch = 1
     else:
-      raise ValueError('Number of audio channels not equal to num specified')
+        nsamps, nch = _wav.shape
+    _wav = np.reshape(_wav, [nsamps, 1, nch])
 
-  if normalize:
-    factor = np.max(np.abs(_wav))
-    if factor > 0:
-      _wav /= factor
+    # Average (mono) or expand (stereo) channels
+    if nch != num_channels:
+        if num_channels == 1:
+            _wav = np.mean(_wav, 2, keepdims=True)
+        elif nch == 1 and num_channels == 2:
+            _wav = np.concatenate([_wav, _wav], axis=2)
+        else:
+            raise ValueError(
+                'Number of audio channels not equal to num specified')
 
-  return _wav
+    if normalize:
+        factor = np.max(np.abs(_wav))
+        if factor > 0:
+            _wav /= factor
+
+    return _wav
+
+
+def generate_file_name_batch(
+    fps,
+    batch_size,
+    repeat=False,
+    shuffle=False,
+    shuffle_buffer_size=None,
+):
+    # Create dataset of filepaths
+
+    dataset = tf.data.Dataset.from_tensor_slices(fps)
+
+    # Shuffle all filepaths every epoch
+    if shuffle:
+        dataset = dataset.shuffle(buffer_size=len(fps))
+
+    # Repeat
+    if repeat:
+        dataset = dataset.repeat()
+    # Shuffle examples
+    if shuffle:
+        dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
+
+    # Make batches
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+
+    return dataset
 
 
 def decode_extract_and_batch(
-    fps,
-    batch_size,
+    dataset,
     slice_len,
     decode_fs,
     decode_num_channels,
@@ -78,12 +114,10 @@ def decode_extract_and_batch(
     slice_first_only=False,
     slice_overlap_ratio=0,
     slice_pad_end=False,
-    repeat=False,
-    shuffle=False,
-    shuffle_buffer_size=None,
     prefetch_size=None,
-    prefetch_gpu_num=None):
-  """Decodes audio file paths into mini-batches of samples.
+    prefetch_gpu_num=None,
+):
+    """Decodes audio file paths into mini-batches of samples.
 
   Args:
     fps: List of audio file paths.
@@ -108,91 +142,72 @@ def decode_extract_and_batch(
     A tuple of np.float32 tensors representing audio waveforms.
       audio: [batch_size, slice_len, 1, nch]
   """
-  # Create dataset of filepaths
-  dataset = tf.data.Dataset.from_tensor_slices(fps)
+    def _decode_audio_shaped(fp):
+        _decode_audio_closure = lambda _fp: decode_audio(
+            _fp,
+            fs=decode_fs,
+            num_channels=decode_num_channels,
+            normalize=decode_normalize,
+            fast_wav=decode_fast_wav,
+        )
 
-  # Shuffle all filepaths every epoch
-  if shuffle:
-    dataset = dataset.shuffle(buffer_size=len(fps))
+        audio = tf.numpy_function(_decode_audio_closure, [fp], tf.float32)
 
-  # Repeat
-  if repeat:
-    dataset = dataset.repeat()
+        return tf.squeeze(audio, axis=1)
 
-  def _decode_audio_shaped(fp):
-    _decode_audio_closure = lambda _fp: decode_audio(
-      _fp,
-      fs=decode_fs,
-      num_channels=decode_num_channels,
-      normalize=decode_normalize,
-      fast_wav=decode_fast_wav)
+    # Decode audio
+    dataset = [_decode_audio_shaped(x) for x in dataset]
 
-    audio = tf.py_func(
-        _decode_audio_closure,
-        [fp],
-        tf.float32,
-        stateful=False)
-    audio.set_shape([None, 1, decode_num_channels])
+    def _slice_dataset_wrapper(audio):
+        # Calculate hop size
+        #print(audio.shape)
 
-    return audio
+        if slice_overlap_ratio < 0:
+            raise ValueError('Overlap ratio must be greater than 0')
+        slice_hop = int(round(slice_len * (1. - slice_overlap_ratio)) + 1e-4)
+        if slice_hop < 1:
+            raise ValueError('Overlap ratio too high')
 
-  # Decode audio
-  dataset = dataset.map(
-      _decode_audio_shaped,
-      num_parallel_calls=decode_parallel_calls)
+        # Randomize starting phase:
+        if slice_randomize_offset and audio.shape[0] > slice_len:
+            start = tf.random.uniform([], maxval=slice_len, dtype=tf.int32)
+            audio = audio[start:] if (start < audio.shape[0]) else audio
+            #print(f"????????????? {start}")
+        #print(audio)
+        # Extract sliceuences
+        audio_slices = tf.signal.frame(
+            audio,
+            slice_len,
+            slice_hop,
+            pad_end=slice_pad_end,
+            pad_value=0,
+            axis=0,
+        )
+        #print(audio_slices)
+        #input()
+        # Only use first slice if requested
+        if slice_first_only:
+            audio_slices = audio_slices[:1]
+        #print(tf.reduce_max(audio_slices), tf.reduce_min(audio_slices))
+        return tf.squeeze(audio_slices, axis=0)
+        return tf.data.Dataset.from_tensor_slices(audio_slices)
 
-  # Parallel
-  def _slice(audio):
-    # Calculate hop size
-    if slice_overlap_ratio < 0:
-      raise ValueError('Overlap ratio must be greater than 0')
-    slice_hop = int(round(slice_len * (1. - slice_overlap_ratio)) + 1e-4)
-    if slice_hop < 1:
-      raise ValueError('Overlap ratio too high')
+    # Extract parallel sliceuences from both audio and features
+    dataset = [_slice_dataset_wrapper(x) for x in dataset]
+    #print([x.shape for x in dataset])
 
-    # Randomize starting phase:
-    if slice_randomize_offset:
-      start = tf.random_uniform([], maxval=slice_len, dtype=tf.int32)
-      audio = audio[start:]
+    dataset = tf.stack(dataset, axis=0)
+    #print(dataset.shape)
+    #input()
 
-    # Extract sliceuences
-    audio_slices = tf.contrib.signal.frame(
-        audio,
-        slice_len,
-        slice_hop,
-        pad_end=slice_pad_end,
-        pad_value=0,
-        axis=0)
+    # Prefetch a number of batches
+    if False and prefetch_size is not None:
+        dataset = dataset.prefetch(prefetch_size)
+        if prefetch_gpu_num is not None and prefetch_gpu_num >= 0:
+            dataset = dataset.apply(
+                tf.data.experimental.prefetch_to_device(
+                    '/device:GPU:{}'.format(prefetch_gpu_num)))
 
-    # Only use first slice if requested
-    if slice_first_only:
-      audio_slices = audio_slices[:1]
+    # Get tensors
 
-    return audio_slices
-
-  def _slice_dataset_wrapper(audio):
-    audio_slices = _slice(audio)
-    return tf.data.Dataset.from_tensor_slices(audio_slices)
-
-  # Extract parallel sliceuences from both audio and features
-  dataset = dataset.flat_map(_slice_dataset_wrapper)
-
-  # Shuffle examples
-  if shuffle:
-    dataset = dataset.shuffle(buffer_size=shuffle_buffer_size)
-
-  # Make batches
-  dataset = dataset.batch(batch_size, drop_remainder=True)
-
-  # Prefetch a number of batches
-  if prefetch_size is not None:
-    dataset = dataset.prefetch(prefetch_size)
-    if prefetch_gpu_num is not None and prefetch_gpu_num >= 0:
-      dataset = dataset.apply(
-          tf.data.experimental.prefetch_to_device(
-            '/device:GPU:{}'.format(prefetch_gpu_num)))
-
-  # Get tensors
-  iterator = dataset.make_one_shot_iterator()
-  
-  return iterator.get_next()
+    return dataset
