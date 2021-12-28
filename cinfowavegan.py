@@ -373,5 +373,6 @@ def WaveGANQ(
     Qoutput = tf.keras.layers.Dense(num_categ)(output)
 
     # Don't need to aggregate batchnorm update ops like we do for the generator because we only use the discriminator for training
-
+    Qoutput = tf.nn.sigmoid(Qoutput)
+    
     return Qoutput

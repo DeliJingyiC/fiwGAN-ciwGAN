@@ -309,6 +309,7 @@ def train(fps, args):
 
             del tape
             steps = batches * epoch + batch
+            print(steps)
             with summary_writer.as_default():
                 tf.summary.scalar('Generator_loss', D_G_z_loss, step=steps)
                 tf.summary.scalar('Discriminator_loss', D_loss, step=steps)
@@ -320,7 +321,7 @@ def train(fps, args):
                 """
         with summary_writer.as_default():
             tf.summary.audio(
-                "G_Audio",
+                f"G_Audio_{steps}",
                 G_z,
                 args.data_sample_rate,
                 step=steps,

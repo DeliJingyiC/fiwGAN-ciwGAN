@@ -13,12 +13,12 @@ source activate
 conda activate tsf2
 
 
-#conda install tensorflow-gpu yapf tensorboard=2.6 tqdm -y
-#conda install -c conda-forge librosa -y
-
+# conda install tensorflow-gpu yapf tensorboard=2.6 tqdm -y
+# conda install -c conda-forge librosa -y
+# conda install -c conda-forge tensorflow-gpu cudatoolkit=11 tqdm librosa tensorboard yapf
 conda env list
 set -x
 
 export TF_CPP_MIN_LOG_LEVEL=1
 
-python train_fiwgan.py --mode=train --train_dir=model --data_dir=setTwo --train_batch_size=64 --data_pad_end --wavegan_loss='wgan-gp' --job_id=$SLURM_JOB_ID --data_slice_len=16384 --data_num_channels=1 --num_epoch=500 --num_categ=3 # > "sbatch/${SLURM_JOB_ID}_main.log"
+python train_fiwgan.py --mode=train --train_dir=model --data_dir=setTwo --train_batch_size=64 --data_pad_end --wavegan_loss='wgan-gp' --job_id=$SLURM_JOB_ID --data_slice_len=16384 --data_num_channels=1 --num_epoch=500 --num_categ=3 > "sbatch/${SLURM_JOB_ID}_main.log"
